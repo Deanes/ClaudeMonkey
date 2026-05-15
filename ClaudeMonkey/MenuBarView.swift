@@ -43,6 +43,30 @@ struct MenuBarView: View {
                 .labelsHidden()
             }
 
+            // Delay toggle
+            Toggle(isOn: $engine.delayEnabled) {
+                HStack {
+                    Text("Delay")
+                        .font(.system(.body, weight: .medium))
+                    Text("\(Int(engine.delaySeconds))s")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+
+            // Countdown indicator
+            if engine.countdown > 0 {
+                HStack(spacing: 8) {
+                    ProgressView(value: 1.0 - (engine.countdown / engine.delaySeconds))
+                        .progressViewStyle(.linear)
+                        .tint(.orange)
+                    Text(String(format: "%.0fs", engine.countdown))
+                        .font(.caption.monospacedDigit().weight(.medium))
+                        .foregroundColor(.orange)
+                }
+            }
+
             Divider()
 
             // Status

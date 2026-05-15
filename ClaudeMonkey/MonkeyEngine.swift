@@ -31,10 +31,14 @@ class MonkeyEngine: ObservableObject {
     @Published var lastPollTime: Date? = nil
     @Published var hasAccessibility = false
     @Published var promptVisible = false
+    @Published var delayEnabled = true
+    @Published var delaySeconds: Double = 4.0
+    @Published var countdown: Double = 0  // seconds remaining before click
 
     private var pollTimer: Timer?
     private let pollInterval: TimeInterval = 1.5
-    private var axActivated = false  // Track if we've activated Chromium's AX tree
+    private var axActivated = false
+    private var promptFirstSeen: Date? = nil  // when we first spotted the current prompt
 
     // MARK: - Accessibility Check
 
@@ -90,13 +94,50 @@ class MonkeyEngine: ObservableObject {
         let err = AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef)
         guard err == .success, let windows = windowsRef as? [AXUIElement] else { return }
 
-        var foundPrompt = false
+        // Collect buttons from all windows
+        var allButtons: [(element: AXUIElement, title: String, kind: ApprovalKind)] = []
         for window in windows {
-            if searchAndClick(element: window, depth: 0) {
-                foundPrompt = true
+            collectApprovalButtons(element: window, depth: 0, buttons: &allButtons)
+        }
+
+        if allButtons.isEmpty {
+            promptVisible = false
+            promptFirstSeen = nil
+            countdown = 0
+            return
+        }
+
+        promptVisible = true
+
+        // Pick which button to click
+        let preferred = allButtons.first { $0.kind == .alwaysAllow }
+        let fallback = allButtons.first { $0.kind == .allowOnce }
+        let target: (element: AXUIElement, title: String, kind: ApprovalKind)?
+        switch approvalMode {
+        case .alwaysAllow:
+            target = preferred ?? fallback
+        case .allowOnce:
+            target = fallback ?? preferred
+        }
+        guard let btn = target else { return }
+
+        // Delay logic
+        if delayEnabled {
+            if promptFirstSeen == nil {
+                promptFirstSeen = Date()
+            }
+            let elapsed = Date().timeIntervalSince(promptFirstSeen!)
+            let remaining = delaySeconds - elapsed
+            if remaining > 0 {
+                countdown = remaining
+                return  // wait longer
             }
         }
-        promptVisible = foundPrompt
+
+        // Time's up (or no delay) — click it
+        countdown = 0
+        promptFirstSeen = nil
+        clickButton(btn.element, title: btn.title)
     }
 
     /// Force Chromium/Electron to materialize its full accessibility tree
@@ -118,32 +159,6 @@ class MonkeyEngine: ObservableObject {
     }
 
     // MARK: - AX Tree Search
-
-    /// Collect all approval buttons in the tree, then decide which to click
-    @discardableResult
-    private func searchAndClick(element: AXUIElement, depth: Int) -> Bool {
-        var buttons: [(element: AXUIElement, title: String, kind: ApprovalKind)] = []
-        collectApprovalButtons(element: element, depth: depth, buttons: &buttons)
-
-        guard !buttons.isEmpty else { return false }
-
-        // Prefer "Always allow" if present and that's our mode; otherwise click whatever's available
-        let preferred = buttons.first { $0.kind == .alwaysAllow }
-        let fallback = buttons.first { $0.kind == .allowOnce }
-
-        let target: (element: AXUIElement, title: String, kind: ApprovalKind)?
-        switch approvalMode {
-        case .alwaysAllow:
-            target = preferred ?? fallback  // prefer Always, fall back to Once
-        case .allowOnce:
-            target = fallback ?? preferred  // prefer Once, fall back to Always
-        }
-
-        if let btn = target {
-            clickButton(btn.element, title: btn.title)
-        }
-        return true
-    }
 
     private enum ApprovalKind {
         case alwaysAllow
