@@ -16,7 +16,7 @@ enum ApprovalMode: String, CaseIterable {
 
 @MainActor
 class MonkeyEngine: ObservableObject {
-    @Published var isEnabled = false {
+    @Published var isEnabled = true {
         didSet {
             if isEnabled {
                 startPolling()
@@ -33,12 +33,12 @@ class MonkeyEngine: ObservableObject {
     @Published var promptVisible = false
     @Published var delayEnabled = true
     @Published var delaySeconds: Double = 4.0
-    @Published var countdown: Double = 0  // seconds remaining before click
+    @Published var countdown: Double = 0
 
     private var pollTimer: Timer?
-    private let pollInterval: TimeInterval = 1.5
+    private let pollInterval: TimeInterval = 3.0
     private var axActivated = false
-    private var promptFirstSeen: Date? = nil  // when we first spotted the current prompt
+    private var promptFirstSeen: Date? = nil
 
     // MARK: - Accessibility Check
 
@@ -83,18 +83,44 @@ class MonkeyEngine: ObservableObject {
 
         let appRef = AXUIElementCreateApplication(claudePID)
 
-        // Activate Chromium's accessibility tree on first poll
-        // by querying the focused element — this forces full tree materialization
-        if !axActivated {
-            activateAXTree(appRef)
-            axActivated = true
+        // Tell Electron/Chromium to expose its full accessibility tree.
+        // AXEnhancedUserInterface is the standard signal — works in Parsec/remote sessions.
+        AXUIElementSetAttributeValue(appRef, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+
+        // Trigger lazy AX tree materialization
+        var focusedRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(appRef, kAXFocusedUIElementAttribute as CFString, &focusedRef)
+
+        // Try standard windows attribute first
+        var windowsRef: CFTypeRef?
+        var windows: [AXUIElement] = []
+        if AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+           let w = windowsRef as? [AXUIElement], !w.isEmpty {
+            windows = w
+        } else {
+            // Fallback: main window, focused window, or children
+            var mainRef: CFTypeRef?
+            var focusWinRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &mainRef)
+            AXUIElementCopyAttributeValue(appRef, kAXFocusedWindowAttribute as CFString, &focusWinRef)
+            if let r = mainRef, CFGetTypeID(r) == AXUIElementGetTypeID() {
+                windows.append(r as! AXUIElement)
+            }
+            if let r = focusWinRef, CFGetTypeID(r) == AXUIElementGetTypeID() {
+                let w = r as! AXUIElement
+                if !windows.contains(where: { CFEqual($0, w) }) { windows.append(w) }
+            }
+            if windows.isEmpty {
+                var childRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(appRef, kAXChildrenAttribute as CFString, &childRef) == .success,
+                   let children = childRef as? [AXUIElement] {
+                    windows = children
+                }
+            }
         }
 
-        var windowsRef: CFTypeRef?
-        let err = AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef)
-        guard err == .success, let windows = windowsRef as? [AXUIElement] else { return }
+        guard !windows.isEmpty else { return }
 
-        // Collect buttons from all windows
         var allButtons: [(element: AXUIElement, title: String, kind: ApprovalKind)] = []
         for window in windows {
             collectApprovalButtons(element: window, depth: 0, buttons: &allButtons)
@@ -109,42 +135,24 @@ class MonkeyEngine: ObservableObject {
 
         promptVisible = true
 
-        // Pick which button to click
         let preferred = allButtons.first { $0.kind == .alwaysAllow }
-        let fallback = allButtons.first { $0.kind == .allowOnce }
+        let fallback  = allButtons.first { $0.kind == .allowOnce }
         let target: (element: AXUIElement, title: String, kind: ApprovalKind)?
         switch approvalMode {
-        case .alwaysAllow:
-            target = preferred ?? fallback
-        case .allowOnce:
-            target = fallback ?? preferred
+        case .alwaysAllow: target = preferred ?? fallback
+        case .allowOnce:   target = fallback  ?? preferred
         }
         guard let btn = target else { return }
 
-        // Delay logic
         if delayEnabled {
-            if promptFirstSeen == nil {
-                promptFirstSeen = Date()
-            }
-            let elapsed = Date().timeIntervalSince(promptFirstSeen!)
-            let remaining = delaySeconds - elapsed
-            if remaining > 0 {
-                countdown = remaining
-                return  // wait longer
-            }
+            if promptFirstSeen == nil { promptFirstSeen = Date() }
+            let remaining = delaySeconds - Date().timeIntervalSince(promptFirstSeen!)
+            if remaining > 0 { countdown = remaining; return }
         }
 
-        // Time's up (or no delay) — click it
         countdown = 0
         promptFirstSeen = nil
         clickButton(btn.element, title: btn.title)
-    }
-
-    /// Force Chromium/Electron to materialize its full accessibility tree
-    private func activateAXTree(_ appRef: AXUIElement) {
-        var focusedRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(appRef, kAXFocusedUIElementAttribute as CFString, &focusedRef)
-        // The query itself is enough to trigger Chromium's tree build
     }
 
     // MARK: - Process Discovery
@@ -166,11 +174,11 @@ class MonkeyEngine: ObservableObject {
     }
 
     private func collectApprovalButtons(element: AXUIElement, depth: Int, buttons: inout [(element: AXUIElement, title: String, kind: ApprovalKind)]) {
-        guard depth < 30 else { return }
+        guard depth < 35 else { return }
 
-        let role = axString(element, kAXRoleAttribute)
+        let role  = axString(element, kAXRoleAttribute)
         let title = axString(element, kAXTitleAttribute) ?? ""
-        let desc = axString(element, kAXDescriptionAttribute) ?? ""
+        let desc  = axString(element, kAXDescriptionAttribute) ?? ""
 
         if role == "AXButton" {
             let text = (title.isEmpty ? desc : title).lowercased()
@@ -193,18 +201,10 @@ class MonkeyEngine: ObservableObject {
         let err = AXUIElementPerformAction(element, kAXPressAction as CFString)
         if err == .success {
             let context = gatherContext(element)
-            let entry = ApprovalEntry(
-                timestamp: Date(),
-                buttonTitle: title,
-                context: context
-            )
+            let entry = ApprovalEntry(timestamp: Date(), buttonTitle: title, context: context)
             log.insert(entry, at: 0)
-            if log.count > 100 {
-                log = Array(log.prefix(100))
-            }
+            if log.count > 100 { log = Array(log.prefix(100)) }
             NSLog("🐵 ClaudeMonkey: Clicked '\(title)' — \(context)")
-
-            // Re-activate AX tree after clicking (tree may change)
             axActivated = false
         } else {
             NSLog("🐵 ClaudeMonkey: Failed to click '\(title)' — AX error \(err.rawValue)")
@@ -214,15 +214,9 @@ class MonkeyEngine: ObservableObject {
     // MARK: - Context Gathering
 
     private func gatherContext(_ button: AXUIElement) -> String {
-        // Walk up to find the prompt container, then read the description text
-        guard let parent = axElement(button, kAXParentAttribute) else {
-            return "permission prompt"
-        }
-
+        guard let parent = axElement(button, kAXParentAttribute) else { return "permission prompt" }
         var texts: [String] = []
         collectTexts(element: parent, depth: 0, maxDepth: 3, texts: &texts)
-
-        // Filter out button labels and short noise
         let filtered = texts.filter { t in
             !t.isEmpty && t.count > 3 && t.count < 300
             && !t.lowercased().hasPrefix("allow")
@@ -234,7 +228,6 @@ class MonkeyEngine: ObservableObject {
 
     private func collectTexts(element: AXUIElement, depth: Int, maxDepth: Int, texts: inout [String]) {
         guard depth < maxDepth else { return }
-
         let role = axString(element, kAXRoleAttribute) ?? ""
         if role == "AXStaticText" || role == "AXTextField" || role == "AXTextArea" {
             if let val = axString(element, kAXValueAttribute), !val.isEmpty {
@@ -243,21 +236,17 @@ class MonkeyEngine: ObservableObject {
                 texts.append(t)
             }
         }
-
         var childrenRef: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef)
         guard err == .success, let children = childrenRef as? [AXUIElement] else { return }
-        for child in children {
-            collectTexts(element: child, depth: depth + 1, maxDepth: maxDepth, texts: &texts)
-        }
+        for child in children { collectTexts(element: child, depth: depth + 1, maxDepth: maxDepth, texts: &texts) }
     }
 
     // MARK: - AX Helpers
 
     private func axString(_ elem: AXUIElement, _ attr: String) -> String? {
         var ref: CFTypeRef?
-        let err = AXUIElementCopyAttributeValue(elem, attr as CFString, &ref)
-        guard err == .success else { return nil }
+        guard AXUIElementCopyAttributeValue(elem, attr as CFString, &ref) == .success else { return nil }
         return ref as? String
     }
 
@@ -271,7 +260,5 @@ class MonkeyEngine: ObservableObject {
 
     // MARK: - Cleanup
 
-    func clearLog() {
-        log.removeAll()
-    }
+    func clearLog() { log.removeAll() }
 }

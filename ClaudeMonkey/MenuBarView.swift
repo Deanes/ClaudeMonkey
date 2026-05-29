@@ -157,7 +157,7 @@ struct MenuBarView: View {
                     NSApplication.shared.terminate(nil)
                 }
                 .buttonStyle(.plain)
-                .font(.caption)
+                .font(.body)
                 .foregroundColor(.red)
             }
         }
