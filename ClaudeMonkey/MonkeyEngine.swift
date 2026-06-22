@@ -48,7 +48,12 @@ class MonkeyEngine: ObservableObject {
     // first prompt of a fresh session is caught by that slow scan, then the next
     // 10 minutes' worth are caught instantly.
     private let hotDuration: TimeInterval = 600  // stay hot 10 min after the last prompt
-    private let coldInterval: TimeInterval = 10  // scan cadence when cold (worst-case first-prompt latency)
+    // Cold scan cadence (worst-case first-prompt latency). Tighter during the
+    // active part of the day, relaxed overnight to save power.
+    private func coldInterval(at date: Date) -> TimeInterval {
+        let hour = Calendar.current.component(.hour, from: date)
+        return (hour >= 8 && hour < 20) ? 6 : 10   // 08:00–20:00 local → 6s, else 10s
+    }
     private var lastButtonSeen: Date? = nil
     private var lastFullScan: Date = .distantPast
     private var enhancedUIPID: pid_t? = nil       // #3: set AXEnhancedUserInterface once per Claude process
@@ -110,7 +115,7 @@ class MonkeyEngine: ObservableObject {
 
         // Hot → scan every poll. Cold → scan only every `coldInterval`.
         // Always keep scanning while a prompt is on screen so the click completes.
-        let scanDue = hot || promptVisible || now.timeIntervalSince(lastFullScan) >= coldInterval
+        let scanDue = hot || promptVisible || now.timeIntervalSince(lastFullScan) >= coldInterval(at: now)
         guard scanDue else { return }
         lastFullScan = now
 
