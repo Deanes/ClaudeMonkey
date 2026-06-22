@@ -47,7 +47,7 @@ class MonkeyEngine: ObservableObject {
     // prompt for a while), we scan only every `coldInterval` to save power — the
     // first prompt of a fresh session is caught by that slow scan, then the next
     // 10 minutes' worth are caught instantly.
-    private let hotDuration: TimeInterval = 600  // stay hot 10 min after the last prompt
+    private let hotDuration: TimeInterval = 1800 // stay hot 30 min after the last prompt
     // Cold scan cadence (worst-case first-prompt latency). Tighter during the
     // active part of the day, relaxed overnight to save power.
     private func coldInterval(at date: Date) -> TimeInterval {
