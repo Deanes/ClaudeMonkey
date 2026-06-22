@@ -11,8 +11,8 @@ struct MenuBarView: View {
                     .font(.headline)
                 Spacer()
                 StatusPill(
-                    text: engine.isEnabled ? (engine.promptVisible ? "Clicking!" : "Watching") : "Off",
-                    color: engine.isEnabled ? (engine.promptVisible ? .orange : .green) : .secondary
+                    text: engine.isEnabled ? (engine.promptVisible ? "Clicking!" : (engine.claudeBusy ? "Watching" : "Idle")) : "Off",
+                    color: engine.isEnabled ? (engine.promptVisible ? .orange : (engine.claudeBusy ? .green : .secondary)) : .secondary
                 )
             }
 
@@ -76,6 +76,13 @@ struct MenuBarView: View {
                     value: engine.claudeRunning ? "Running" : "Not found",
                     color: engine.claudeRunning ? .green : .red
                 )
+                if engine.isEnabled, engine.claudeRunning {
+                    StatusRow(
+                        label: "Activity",
+                        value: engine.claudeBusy ? "Active (scanning)" : "Idle (backed off)",
+                        color: engine.claudeBusy ? .green : .secondary
+                    )
+                }
                 StatusRow(
                     label: "Accessibility",
                     value: engine.hasAccessibility ? "Granted" : "Not granted",
@@ -149,7 +156,7 @@ struct MenuBarView: View {
 
             // Footer
             HStack {
-                Text("v1.0")
+                Text("v1.2")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Spacer()

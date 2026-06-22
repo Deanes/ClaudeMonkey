@@ -49,6 +49,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            // Rebuild the content view on each open so SwiftUI controls (the
+            // Auto-Approve switch in particular) always render the engine's
+            // current state instead of a stale cached appearance.
+            popover.contentViewController = NSHostingController(
+                rootView: MenuBarView(engine: engine)
+            )
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             // Ensure popover gets focus
             NSApp.activate(ignoringOtherApps: true)

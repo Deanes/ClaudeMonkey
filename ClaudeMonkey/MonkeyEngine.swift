@@ -31,7 +31,8 @@ class MonkeyEngine: ObservableObject {
     @Published var lastPollTime: Date? = nil
     @Published var hasAccessibility = false
     @Published var promptVisible = false
-    @Published var delayEnabled = true
+    @Published var claudeBusy = false
+    @Published var delayEnabled = false
     @Published var delaySeconds: Double = 4.0
     @Published var countdown: Double = 0
 
@@ -39,6 +40,24 @@ class MonkeyEngine: ObservableObject {
     private let pollInterval: TimeInterval = 3.0
     private var axActivated = false
     private var promptFirstSeen: Date? = nil
+
+    // MARK: - Hot period
+    // Prompts cluster: once we see one, more are likely soon. So after finding a
+    // prompt we go "hot" and scan every poll (3s) for 10 minutes. When cold (no
+    // prompt for a while), we scan only every `coldInterval` to save power — the
+    // first prompt of a fresh session is caught by that slow scan, then the next
+    // 10 minutes' worth are caught instantly.
+    private let hotDuration: TimeInterval = 600  // stay hot 10 min after the last prompt
+    private let coldInterval: TimeInterval = 10  // scan cadence when cold (worst-case first-prompt latency)
+    private var lastButtonSeen: Date? = nil
+    private var lastFullScan: Date = .distantPast
+    private var enhancedUIPID: pid_t? = nil       // #3: set AXEnhancedUserInterface once per Claude process
+
+    init() {
+        // `isEnabled`'s didSet doesn't fire for its default value, so polling
+        // would never start on launch even though the toggle shows "on".
+        if isEnabled { startPolling() }
+    }
 
     // MARK: - Accessibility Check
 
@@ -67,25 +86,49 @@ class MonkeyEngine: ObservableObject {
         pollTimer?.invalidate()
         pollTimer = nil
         axActivated = false
+        claudeBusy = false
     }
 
     private func poll() {
-        lastPollTime = Date()
+        let now = Date()
+        lastPollTime = now
         hasAccessibility = AXIsProcessTrusted()
         guard hasAccessibility else { return }
 
         guard let claudePID = findClaudePID() else {
             claudeRunning = false
             promptVisible = false
+            claudeBusy = false
+            enhancedUIPID = nil
             return
         }
         claudeRunning = true
 
+        // Hot if we've seen a prompt within the last `hotDuration`.
+        let hot = lastButtonSeen.map { now.timeIntervalSince($0) < hotDuration } ?? false
+        claudeBusy = hot
+
+        // Hot → scan every poll. Cold → scan only every `coldInterval`.
+        // Always keep scanning while a prompt is on screen so the click completes.
+        let scanDue = hot || promptVisible || now.timeIntervalSince(lastFullScan) >= coldInterval
+        guard scanDue else { return }
+        lastFullScan = now
+
+        scanForPrompts(claudePID: claudePID)
+    }
+
+    private func scanForPrompts(claudePID: pid_t) {
         let appRef = AXUIElementCreateApplication(claudePID)
 
         // Tell Electron/Chromium to expose its full accessibility tree.
         // AXEnhancedUserInterface is the standard signal — works in Parsec/remote sessions.
-        AXUIElementSetAttributeValue(appRef, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        // #3: set it once per Claude process, not on every poll. Re-pinning it every
+        // 3s forced Claude's renderer to keep rebuilding its whole AX tree — a constant
+        // background CPU tax. Once is enough to keep the tree exposed.
+        if enhancedUIPID != claudePID {
+            AXUIElementSetAttributeValue(appRef, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+            enhancedUIPID = claudePID
+        }
 
         // Trigger lazy AX tree materialization
         var focusedRef: CFTypeRef?
@@ -134,6 +177,7 @@ class MonkeyEngine: ObservableObject {
         }
 
         promptVisible = true
+        lastButtonSeen = Date()   // found a prompt → (re)enter the hot period
 
         let preferred = allButtons.first { $0.kind == .alwaysAllow }
         let fallback  = allButtons.first { $0.kind == .allowOnce }
